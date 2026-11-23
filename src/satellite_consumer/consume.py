@@ -190,6 +190,20 @@ def check_coords(ds: xr.Dataset, store_ds: xr.Dataset, skip_dims: list[str]) -> 
         raise ValueError("Non-appending dimensions do not match existing store")
 
 
+def _find_missing_timestamps(
+    expected_times: list[dt.datetime],
+    actual_times: list[dt.datetime],
+) -> list[dt.datetime]:
+    """Return expected timestamps that are absent from the stored timestamps."""
+    actual_times_set = set(actual_times)
+
+    return [
+        timestamp
+        for timestamp in expected_times
+        if timestamp not in actual_times_set
+    ]
+
+
 async def consume_to_store(
     dt_range: tuple[dt.datetime, dt.datetime],
     jump_to_latest: bool,
@@ -368,6 +382,37 @@ async def consume_to_store(
             encoding=encoding,
             write_new=store_ds is None,
         )
+    # Check that all expected timestamps are present in the final store.
+    expected_count = int(
+        (dt_range[1] - dt_range[0]).total_seconds()
+        / (cadence_mins * 60)
+    )
+
+    expected_times = (
+        pd.date_range(
+            start=pd.to_datetime(dt_range[0], utc=True),
+            periods=expected_count,
+            freq=f"{cadence_mins}min",
+        )
+        .to_pydatetime()
+        .tolist()
+    )
+
+    final_store_ds = storage.get_existing_dataset(dst)
+
+    if final_store_ds is None:
+        actual_times = []
+    else:
+        actual_times = (
+            pd.to_datetime(final_store_ds.coords["time"].values, utc=True)
+            .to_pydatetime()
+            .tolist()
+        )
+
+    missing_times = _find_missing_timestamps(expected_times, actual_times)
+
+    if missing_times:
+        log.warning("Missing timestamps in store: %s", missing_times)
 
     log.info(
         "path=%s, skips=%d, errs=%d, finished %d writes",
